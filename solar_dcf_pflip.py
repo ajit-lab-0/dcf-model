@@ -312,6 +312,9 @@ def main():
         st.subheader("💼 Sponsor")
         discount_rate = st.number_input("Discount Rate for NPV (%)", value=10.0, step=0.5, format="%.1f")
 
+        st.divider()
+        st.caption("© Ajit Gopalakrishnan")
+
     params = dict(
         size_mw=size_mw, capex_per_w=capex_per_w,
         capacity_factor=capacity_factor, degradation=degradation,
