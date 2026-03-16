@@ -161,9 +161,10 @@ def run_model(p):
     op_df = pd.DataFrame(op_rows)
     ebitda_arr = op_df["ebitda"].tolist()
 
-    # Step 2 — size debt (min DSCR across all years)
+    # Step 2 — size debt (min DSCR across all years); debt term cannot exceed contract term
+    effective_debt_term = min(p["debt_term"], years)
     loan, debt_sched, min_dscr, binding = size_debt(
-        ebitda_arr, p["dscr_target"], p["debt_rate"], p["debt_term"], capex, years=years
+        ebitda_arr, p["dscr_target"], p["debt_rate"], effective_debt_term, capex, years=years
     )
 
     # Step 3 — CFADS (= EBITDA, pre-debt service) and cash after DS
@@ -309,7 +310,9 @@ def main():
         st.subheader("🏦 Debt")
         dscr_target = st.number_input("Min DSCR Target (all years)", value=1.35, step=0.05, format="%.2f",
                                        help="Debt sized so every year of the debt term clears this DSCR")
-        debt_term = st.number_input("Loan Term (yrs)", value=18, step=1, min_value=5, max_value=25)
+        debt_term = st.number_input("Loan Term (yrs)", value=10, step=1, min_value=5, max_value=25)
+        if debt_term > contract_term:
+            st.warning(f"Loan term ({debt_term}yr) exceeds contract term ({contract_term}yr) — capped at {contract_term}yr.")
         debt_rate = st.number_input("Interest Rate (%)", value=8.0, step=0.25, format="%.2f")
 
         st.subheader("🌿 Tax Equity (Pflip)")
