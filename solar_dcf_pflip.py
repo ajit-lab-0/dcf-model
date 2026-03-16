@@ -283,6 +283,9 @@ def main():
         "Tax equity sized from **NPV of ITC + MACRS + cash** at TE target yield."
     )
 
+    if "scenarios" not in st.session_state:
+        st.session_state.scenarios = {}
+
     # ── Sidebar inputs ────────────────────────────────────────────────────────
     with st.sidebar:
         st.caption("© Ajit Gopalakrishnan")
@@ -296,7 +299,7 @@ def main():
 
         st.subheader("💰 Revenue")
         contract_term = st.number_input("Contract Term (yrs)", value=20, step=1, min_value=5, max_value=40)
-        ppa_mwh = st.number_input("PPA Price Yr 1 ($/MWh)", value=65.0, step=1.0)
+        ppa_mwh = st.number_input("PPA Price Yr 1 ($/MWh)", value=50.0, step=1.0)
         ppa_escalator = st.number_input("PPA Escalator (% /yr)", value=0.0, step=0.25, format="%.2f")
 
         st.subheader("🔧 Operating Costs")
@@ -322,6 +325,22 @@ def main():
         discount_rate = st.number_input("Discount Rate for NPV (%)", value=10.0, step=0.5, format="%.1f")
 
         st.divider()
+        st.subheader("💾 Save Scenario")
+        sc_name = st.text_input("Name", placeholder="e.g. Base Case", key="sc_name_input")
+        if st.button("Save current scenario", use_container_width=True):
+            if sc_name.strip():
+                st.session_state.scenarios[sc_name.strip()] = {"params": None, "results": None}
+                st.session_state["_pending_save"] = sc_name.strip()
+            else:
+                st.warning("Enter a name first.")
+        if st.session_state.scenarios:
+            st.caption(f"{len(st.session_state.scenarios)} scenario(s) saved")
+            for sname in list(st.session_state.scenarios.keys()):
+                c1, c2 = st.columns([4, 1])
+                c1.caption(f"• {sname}")
+                if c2.button("✕", key=f"del_{sname}", help=f"Delete {sname}"):
+                    del st.session_state.scenarios[sname]
+                    st.rerun()
 
     params = dict(
         size_mw=size_mw, capex_per_w=capex_per_w,
@@ -338,6 +357,12 @@ def main():
     m = run_model(params)
     df = m["df"]
 
+    # Complete any pending save now that results are available
+    if st.session_state.get("_pending_save"):
+        sname = st.session_state.pop("_pending_save")
+        st.session_state.scenarios[sname] = {"params": dict(params), "results": m}
+        st.toast(f"Saved '{sname}'", icon="💾")
+
     # ── Header metrics ────────────────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Total Capex", fmt_m(m["capex"]))
@@ -349,12 +374,13 @@ def main():
     st.divider()
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📊 Returns & Sources",
         "📋 Cash Flows",
         "📐 DSCR Profile",
         "🔀 Flip Analysis",
         "📈 Charts",
+        "📁 Compare",
     ])
 
     # ── Tab 1: Returns & Sources ──────────────────────────────────────────────
@@ -613,6 +639,115 @@ def main():
         fig_split.update_layout(barmode="group", xaxis_title="Year", yaxis_title="$M",
                                 height=380, margin=dict(t=20, b=40))
         st.plotly_chart(fig_split, use_container_width=True)
+
+
+    # ── Tab 6: Compare ────────────────────────────────────────────────────────
+    with tab6:
+        st.subheader("Scenario Comparison")
+        saved = st.session_state.scenarios
+        if len(saved) < 2:
+            st.info("Save at least 2 scenarios using the sidebar to compare them here.")
+        else:
+            names = list(saved.keys())
+            col_s1, col_s2 = st.columns(2)
+            s1 = col_s1.selectbox("Scenario A", names, key="cmp_a")
+            s2 = col_s2.selectbox("Scenario B", names, index=min(1, len(names) - 1), key="cmp_b")
+
+            r1, p1 = saved[s1]["results"], saved[s1]["params"]
+            r2, p2 = saved[s2]["results"], saved[s2]["params"]
+
+            st.divider()
+
+            # ── Returns & capital stack ────────────────────────────────────
+            st.markdown("**Returns & Capital Stack**")
+            def _pct(v): return fmt_pct(v) if v is not None and not np.isnan(v) else "—"
+            def _m(v):   return fmt_m(v)
+            def _x(v):   return f"{v:.2f}x" if v is not None else "—"
+            def _yr(v):  return f"Year {v}" if v else "Not reached"
+
+            metrics_rows = [
+                ("Sponsor Equity IRR",    _pct(r1["sp_irr"]),                          _pct(r2["sp_irr"])),
+                ("Tax Equity IRR",        _pct(r1["te_irr"]),                          _pct(r2["te_irr"])),
+                ("Project NPV (CFADS)",   _m(r1["project_npv"]),                       _m(r2["project_npv"])),
+                ("Total Capex",           _m(r1["capex"]),                             _m(r2["capex"])),
+                ("Senior Debt",           f"{_m(r1['loan'])} ({r1['loan']/r1['capex']*100:.0f}%)",
+                                          f"{_m(r2['loan'])} ({r2['loan']/r2['capex']*100:.0f}%)"),
+                ("Tax Equity",            f"{_m(r1['te_contrib'])} ({r1['te_contrib']/r1['capex']*100:.0f}%)",
+                                          f"{_m(r2['te_contrib'])} ({r2['te_contrib']/r2['capex']*100:.0f}%)"),
+                ("Sponsor Equity",        f"{_m(r1['equity_contrib'])} ({r1['equity_contrib']/r1['capex']*100:.0f}%)",
+                                          f"{_m(r2['equity_contrib'])} ({r2['equity_contrib']/r2['capex']*100:.0f}%)"),
+                ("ITC Generated",         _m(r1["itc_amt"]),                           _m(r2["itc_amt"])),
+                ("Min DSCR",              _x(r1["min_dscr"]),                          _x(r2["min_dscr"])),
+                ("Flip Year",             _yr(r1["flip_year"]),                        _yr(r2["flip_year"])),
+                ("Binding Constraint",    r1["binding"],                               r2["binding"]),
+            ]
+            metrics_df = pd.DataFrame(metrics_rows, columns=["Metric", s1, s2])
+            st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # ── Key assumptions ────────────────────────────────────────────
+            st.markdown("**Key Assumptions**")
+            def _p(d, k, fmt=None):
+                v = d.get(k, "—")
+                return fmt.format(v) if fmt and v != "—" else str(v)
+
+            inputs_rows = [
+                ("Size (MW-dc)",               _p(p1, "size_mw"),                    _p(p2, "size_mw")),
+                ("Capex ($/Wdc)",              _p(p1, "capex_per_w", "${:.2f}"),      _p(p2, "capex_per_w", "${:.2f}")),
+                ("PPA Price Yr 1 ($/MWh)",     _p(p1, "ppa_mwh", "${:.0f}"),         _p(p2, "ppa_mwh", "${:.0f}")),
+                ("PPA Escalator (%/yr)",       _p(p1, "ppa_escalator", "{:.2f}%"),   _p(p2, "ppa_escalator", "{:.2f}%")),
+                ("Capacity Factor (%)",        _p(p1, "capacity_factor", "{:.1f}%"), _p(p2, "capacity_factor", "{:.1f}%")),
+                ("Contract Term (yrs)",        _p(p1, "contract_term"),              _p(p2, "contract_term")),
+                ("Opex ($/MW/yr)",             _p(p1, "opex_per_mw", "${:,.0f}"),    _p(p2, "opex_per_mw", "${:,.0f}")),
+                ("Interest Rate (%)",          _p(p1, "debt_rate", "{:.2f}%"),       _p(p2, "debt_rate", "{:.2f}%")),
+                ("DSCR Target",                _p(p1, "dscr_target", "{:.2f}x"),     _p(p2, "dscr_target", "{:.2f}x")),
+                ("Loan Term (yrs)",            _p(p1, "debt_term"),                  _p(p2, "debt_term")),
+                ("ITC Rate (%)",               _p(p1, "itc_rate", "{:.0f}%"),        _p(p2, "itc_rate", "{:.0f}%")),
+                ("TE Target Yield (%)",        _p(p1, "te_yield", "{:.2f}%"),        _p(p2, "te_yield", "{:.2f}%")),
+                ("TE Pre-Flip Alloc (%)",      _p(p1, "te_pre_flip", "{:.0f}%"),     _p(p2, "te_pre_flip", "{:.0f}%")),
+                ("TE Post-Flip Alloc (%)",     _p(p1, "te_post_flip", "{:.0f}%"),    _p(p2, "te_post_flip", "{:.0f}%")),
+                ("Max TE (% Capex)",           _p(p1, "te_max_pct", "{:.0f}%"),      _p(p2, "te_max_pct", "{:.0f}%")),
+                ("Discount Rate (%)",          _p(p1, "discount_rate", "{:.1f}%"),   _p(p2, "discount_rate", "{:.1f}%")),
+            ]
+            inputs_df = pd.DataFrame(inputs_rows, columns=["Assumption", s1, s2])
+
+            # Highlight rows where the two scenarios differ
+            def highlight_diff(row):
+                if row.iloc[1] != row.iloc[2]:
+                    return ["", "background-color: #fef9c3", "background-color: #fef9c3"]
+                return ["", "", ""]
+
+            st.dataframe(
+                inputs_df.style.apply(highlight_diff, axis=1),
+                use_container_width=True, hide_index=True,
+            )
+            st.caption("Highlighted rows = assumptions that differ between scenarios.")
+
+            st.divider()
+
+            # ── IRR comparison bar chart ───────────────────────────────────
+            st.markdown("**IRR Comparison**")
+            irr_fig = go.Figure()
+            irr_fig.add_bar(
+                name=s1,
+                x=["Sponsor IRR", "Tax Equity IRR"],
+                y=[r1["sp_irr"] * 100 if r1["sp_irr"] else 0,
+                   r1["te_irr"] * 100 if r1["te_irr"] else 0],
+                marker_color="#f59e0b",
+            )
+            irr_fig.add_bar(
+                name=s2,
+                x=["Sponsor IRR", "Tax Equity IRR"],
+                y=[r2["sp_irr"] * 100 if r2["sp_irr"] else 0,
+                   r2["te_irr"] * 100 if r2["te_irr"] else 0],
+                marker_color="#3b82f6",
+            )
+            irr_fig.update_layout(
+                barmode="group", yaxis_title="IRR (%)",
+                height=320, margin=dict(t=20, b=40),
+            )
+            st.plotly_chart(irr_fig, use_container_width=True)
 
 
 if __name__ == "__main__":
