@@ -315,7 +315,7 @@ def main():
                                     help="TE contribution back-solved so TE hits this IRR on ITC + MACRS + cash")
         te_pre_flip = st.number_input("TE Pre-Flip Allocation (%)", value=99, step=1, min_value=50, max_value=99)
         te_post_flip = st.number_input("TE Post-Flip Allocation (%)", value=5, step=1, min_value=1, max_value=30)
-        te_max_pct = st.number_input("Max TE Contribution (% of Capex)", value=30, step=1, min_value=10, max_value=80,
+        te_max_pct = st.number_input("Max TE Contribution (% of Capex)", value=45, step=5, min_value=10, max_value=80,
                                       help="Hard cap on tax equity as a % of total capex")
 
         st.subheader("💼 Sponsor")
