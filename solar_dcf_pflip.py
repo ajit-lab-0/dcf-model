@@ -44,7 +44,7 @@ def fmt_pct(v, d=1):
     return f"{v*100:.{d}f}%"
 
 # ── Debt sizing (sculpted) ────────────────────────────────────────────────────
-def size_debt(ebitda_arr, dscr_target, rate, term, capex):
+def size_debt(ebitda_arr, dscr_target, rate, term, capex, years=YEARS):
     """
     Sculpted debt: DS[i] = EBITDA[i] / dscr_target for each year in the debt term.
     Loan = PV of that payment stream at the debt rate.
@@ -71,7 +71,7 @@ def size_debt(ebitda_arr, dscr_target, rate, term, capex):
     rows = []
     min_dscr = float("inf")
 
-    for i in range(YEARS):
+    for i in range(years):
         if i >= term:
             rows.append(dict(open_bal=0, interest=0, principal=0,
                              debt_service=0, close_bal=0, dscr=None))
@@ -91,7 +91,7 @@ def size_debt(ebitda_arr, dscr_target, rate, term, capex):
 
 
 # ── Tax equity sizing ─────────────────────────────────────────────────────────
-def size_tax_equity(capex, itc_rate, te_yield, cfads_arr, te_pre_flip, te_post_flip, flip_year=None):
+def size_tax_equity(capex, itc_rate, te_yield, cfads_arr, te_pre_flip, te_post_flip, te_max_pct=45, flip_year=None, years=YEARS):
     """
     Back-solve TE contribution from NPV of ITC + MACRS tax shields + cash
     allocation at the TE investor's target yield.
@@ -101,29 +101,29 @@ def size_tax_equity(capex, itc_rate, te_yield, cfads_arr, te_pre_flip, te_post_f
     dep_base = capex * (1 - itc_rate / 100 / 2)  # ITC basis haircut
 
     tax_benefits = []
-    for i in range(YEARS):
+    for i in range(years):
         dep = (MACRS[i] if i < len(MACRS) else 0) * dep_base
         itc = itc_amt if i == 0 else 0
         tax_benefits.append(itc + dep * TAX_RATE)
 
     cash_benefits = []
-    for i in range(YEARS):
+    for i in range(years):
         yr = i + 1
         alloc = (te_pre_flip / 100) if (flip_year is None or yr <= flip_year) else (te_post_flip / 100)
         cash_benefits.append(cfads_arr[i] * alloc)
 
-    combined = [tax_benefits[i] + cash_benefits[i] for i in range(YEARS)]
+    combined = [tax_benefits[i] + cash_benefits[i] for i in range(years)]
     te_contribution = calc_npv(te_yield / 100, combined)
     # Hard cap: TE rarely exceeds ~45% of capex in practice
-    te_contribution = max(0, min(te_contribution, capex * 0.45))
+    te_contribution = max(0, min(te_contribution, capex * (te_max_pct / 100)))
     return te_contribution, itc_amt, dep_base, tax_benefits
 
 
-def estimate_flip_year(te_contrib, cfads_arr, itc_amt, dep_base, te_pre_flip, te_post_flip, te_yield_target):
+def estimate_flip_year(te_contrib, cfads_arr, itc_amt, dep_base, te_pre_flip, te_post_flip, te_yield_target, years=YEARS):
     """Quick pass to find the year TE running IRR first hits the target yield."""
     te_cfs = [-te_contrib]
     flip_year = None
-    for i in range(YEARS):
+    for i in range(years):
         is_pre_flip = flip_year is None
         te_alloc = (te_pre_flip / 100) if is_pre_flip else (te_post_flip / 100)
         dep = (MACRS[i] if i < len(MACRS) else 0) * dep_base
@@ -145,10 +145,12 @@ def run_model(p):
     Returns: dict of computed results
     """
     capex = p["size_mw"] * 1e6 * p["capex_per_w"]
+    years = p["contract_term"]
+    yrs = list(range(1, years + 1))
 
     # Step 1 — operating cash flows (pre-debt)
     op_rows = []
-    for i, yr in enumerate(YRS):
+    for i, yr in enumerate(yrs):
         cf_factor = (1 - p["degradation"] / 100) ** i
         energy_mwh = p["size_mw"] * (p["capacity_factor"] / 100) * 8760 * cf_factor
         ppa = p["ppa_mwh"] * (1 + p["ppa_escalator"] / 100) ** i
@@ -161,22 +163,23 @@ def run_model(p):
 
     # Step 2 — size debt (min DSCR across all years)
     loan, debt_sched, min_dscr, binding = size_debt(
-        ebitda_arr, p["dscr_target"], p["debt_rate"], p["debt_term"], capex
+        ebitda_arr, p["dscr_target"], p["debt_rate"], p["debt_term"], capex, years=years
     )
 
-    # Step 3 — CFADS
-    cfads_arr = [ebitda_arr[i] - debt_sched.loc[i, "debt_service"] for i in range(YEARS)]
+    # Step 3 — CFADS (= EBITDA, pre-debt service) and cash after DS
+    cfads_arr = ebitda_arr[:]
+    cash_after_ds_arr = [ebitda_arr[i] - debt_sched.loc[i, "debt_service"] for i in range(years)]
 
     # Step 4 — size tax equity (iterate to convergence with flip year)
     flip_year_est = None
     for _ in range(10):
         te_contrib, itc_amt, dep_base, tax_benefits = size_tax_equity(
-            capex, p["itc_rate"], p["te_yield"], cfads_arr,
-            p["te_pre_flip"], p["te_post_flip"], flip_year=flip_year_est
+            capex, p["itc_rate"], p["te_yield"], cash_after_ds_arr,
+            p["te_pre_flip"], p["te_post_flip"], te_max_pct=p["te_max_pct"], flip_year=flip_year_est, years=years
         )
         new_flip = estimate_flip_year(
-            te_contrib, cfads_arr, itc_amt, dep_base,
-            p["te_pre_flip"], p["te_post_flip"], p["te_yield"]
+            te_contrib, cash_after_ds_arr, itc_amt, dep_base,
+            p["te_pre_flip"], p["te_post_flip"], p["te_yield"], years=years
         )
         if new_flip == flip_year_est:
             break
@@ -189,9 +192,10 @@ def run_model(p):
     flip_year = None
     rows = []
 
-    for i, yr in enumerate(YRS):
+    for i, yr in enumerate(yrs):
         ds = debt_sched.iloc[i]
         cfads = cfads_arr[i]
+        cash_after_ds = cash_after_ds_arr[i]
         dep = (MACRS[i] if i < len(MACRS) else 0) * dep_base
         taxable_income = op_df.loc[i, "revenue"] - op_df.loc[i, "opex"] - ds["interest"] - dep
         macrs_shield = dep * TAX_RATE
@@ -201,8 +205,8 @@ def run_model(p):
         te_alloc = p["te_pre_flip"] / 100 if is_pre_flip else p["te_post_flip"] / 100
         sp_alloc = 1 - te_alloc
 
-        te_cf = cfads * te_alloc + itc_alloc + macrs_shield
-        sp_cf = cfads * sp_alloc
+        te_cf = cash_after_ds * te_alloc + itc_alloc + macrs_shield
+        sp_cf = cash_after_ds * sp_alloc
 
         te_cfs.append(te_cf)
         sp_cfs.append(sp_cf)
@@ -227,6 +231,7 @@ def run_model(p):
             close_bal=ds["close_bal"],
             dscr=ds["dscr"],
             cfads=cfads,
+            cash_after_ds=cash_after_ds,
             depreciation=dep,
             taxable_income=taxable_income,
             macrs_shield=macrs_shield,
@@ -280,6 +285,7 @@ def main():
 
     # ── Sidebar inputs ────────────────────────────────────────────────────────
     with st.sidebar:
+        st.caption("© Ajit Gopalakrishnan")
         st.header("Inputs")
 
         st.subheader("📐 Project")
@@ -289,7 +295,8 @@ def main():
         degradation = st.number_input("Panel Degradation (% /yr)", value=0.5, step=0.1, format="%.1f")
 
         st.subheader("💰 Revenue")
-        ppa_mwh = st.number_input("PPA Price Yr 1 ($/MWh)", value=45.0, step=1.0)
+        contract_term = st.number_input("Contract Term (yrs)", value=20, step=1, min_value=5, max_value=40)
+        ppa_mwh = st.number_input("PPA Price Yr 1 ($/MWh)", value=65.0, step=1.0)
         ppa_escalator = st.number_input("PPA Escalator (% /yr)", value=0.0, step=0.25, format="%.2f")
 
         st.subheader("🔧 Operating Costs")
@@ -300,7 +307,7 @@ def main():
         dscr_target = st.number_input("Min DSCR Target (all years)", value=1.35, step=0.05, format="%.2f",
                                        help="Debt sized so every year of the debt term clears this DSCR")
         debt_term = st.number_input("Loan Term (yrs)", value=18, step=1, min_value=5, max_value=25)
-        debt_rate = st.number_input("Interest Rate (%)", value=6.5, step=0.25, format="%.2f")
+        debt_rate = st.number_input("Interest Rate (%)", value=8.0, step=0.25, format="%.2f")
 
         st.subheader("🌿 Tax Equity (Pflip)")
         itc_rate = st.number_input("ITC Rate (%)", value=30, step=1, min_value=0, max_value=50)
@@ -308,21 +315,23 @@ def main():
                                     help="TE contribution back-solved so TE hits this IRR on ITC + MACRS + cash")
         te_pre_flip = st.number_input("TE Pre-Flip Allocation (%)", value=99, step=1, min_value=50, max_value=99)
         te_post_flip = st.number_input("TE Post-Flip Allocation (%)", value=5, step=1, min_value=1, max_value=30)
+        te_max_pct = st.number_input("Max TE Contribution (% of Capex)", value=30, step=1, min_value=10, max_value=80,
+                                      help="Hard cap on tax equity as a % of total capex")
 
         st.subheader("💼 Sponsor")
         discount_rate = st.number_input("Discount Rate for NPV (%)", value=10.0, step=0.5, format="%.1f")
 
         st.divider()
-        st.caption("© Ajit Gopalakrishnan")
 
     params = dict(
         size_mw=size_mw, capex_per_w=capex_per_w,
         capacity_factor=capacity_factor, degradation=degradation,
+        contract_term=contract_term,
         ppa_mwh=ppa_mwh, ppa_escalator=ppa_escalator,
         opex_per_mw=opex_per_mw, opex_escalator=opex_escalator,
         dscr_target=dscr_target, debt_term=debt_term, debt_rate=debt_rate,
         itc_rate=itc_rate, te_yield=te_yield,
-        te_pre_flip=te_pre_flip, te_post_flip=te_post_flip,
+        te_pre_flip=te_pre_flip, te_post_flip=te_post_flip, te_max_pct=te_max_pct,
         discount_rate=discount_rate,
     )
 
@@ -356,7 +365,7 @@ def main():
         col2.metric("Tax Equity IRR", fmt_pct(m["te_irr"]),
                     help="Includes ITC + MACRS shields + pre-flip cash")
         col3.metric("Project NPV (CFADS)", fmt_m(m["project_npv"]),
-                    help=f"At {discount_rate}% discount rate")
+                    help=f"NPV of CFADS (= EBITDA) at {discount_rate}% discount rate")
 
         st.subheader("Sources & Uses")
         su = pd.DataFrame([
@@ -381,12 +390,12 @@ def main():
         st.subheader("Project-Level Annual Cash Flows")
         cf_display = df[[
             "yr", "revenue", "opex", "ebitda",
-            "interest", "principal", "debt_service", "cfads",
+            "interest", "principal", "debt_service", "cash_after_ds",
             "depreciation", "macrs_shield", "taxable_income"
         ]].copy()
         cf_display.columns = [
             "Year", "Revenue", "Opex", "EBITDA",
-            "Interest", "Principal", "Debt Service", "CFADS",
+            "Interest", "Principal", "Debt Service", "Cash After DS",
             "Depreciation", "MACRS Shield", "Taxable Income"
         ]
         for col in cf_display.columns[1:]:
@@ -404,23 +413,22 @@ def main():
         with col_exp1:
             st.markdown("**How CFADS is calculated**")
             st.markdown(
-                "CFADS (Cash Flow Available for Debt Service) is the cash remaining "
-                "after operating costs but before debt service is paid:\n\n"
+                "CFADS (Cash Flow Available for Debt Service) is the cash available "
+                "to service debt — calculated before debt service is paid:\n\n"
                 "> **Revenue** *(PPA price × energy generated)*  \n"
                 "> − **Opex** *(O&M, insurance, land, mgmt fees)*  \n"
-                "> = **EBITDA**  \n"
-                "> − **Debt Service** *(interest + scheduled principal)*  \n"
-                "> = **CFADS**\n\n"
-                "CFADS is the pool of cash split between the tax equity investor "
-                "and sponsor according to the pre/post-flip allocation percentages. "
-                "It is also the numerator in the DSCR calculation."
+                "> = **CFADS** *(= EBITDA)*\n\n"
+                "CFADS is the numerator in the DSCR calculation: **DSCR = CFADS ÷ Debt Service**.\n\n"
+                "After debt service is paid, the residual **Cash After DS = CFADS − Debt Service** "
+                "is the pool split between the tax equity investor and sponsor according to the "
+                "pre/post-flip allocation percentages."
             )
         with col_exp2:
             st.markdown("**How Taxable Income is calculated**")
             st.markdown(
                 "Taxable income is the partnership's book income allocated to investors "
-                "for tax purposes. It differs from CFADS because it uses depreciation "
-                "instead of principal repayment:\n\n"
+                "for tax purposes. It differs from CFADS because it deducts interest and "
+                "depreciation (not principal):\n\n"
                 "> **Revenue**  \n"
                 "> − **Opex**  \n"
                 "> − **Interest** *(deductible)*  \n"
@@ -442,30 +450,24 @@ def main():
             f"**Loan:** {fmt_m(m['loan'])}"
         )
         dscr_df = df[df["yr"] <= debt_term][[
-            "yr", "open_bal", "revenue", "opex", "ebitda", "debt_service", "cfads", "dscr"
+            "yr", "open_bal", "revenue", "opex", "ebitda", "debt_service", "cash_after_ds", "dscr"
         ]].copy()
-        dscr_df.columns = ["Year", "Open Balance ($M)", "Revenue", "Opex", "EBITDA", "Debt Service", "CFADS", "DSCR"]
+        dscr_df.columns = ["Year", "Open Balance ($M)", "Revenue", "Opex", "CFADS", "Debt Service", "Cash After DS", "DSCR"]
         dscr_df["Open Balance ($M)"] = dscr_df["Open Balance ($M)"] / 1e6
-        for col in ["Revenue", "Opex", "EBITDA", "Debt Service", "CFADS"]:
+        for col in ["Revenue", "Opex", "CFADS", "Debt Service", "Cash After DS"]:
             dscr_df[col] = dscr_df[col] / 1000
         dscr_df["Pass/Fail"] = dscr_df["DSCR"].apply(lambda x: "✅ Pass" if x >= dscr_target else "❌ Fail")
         dscr_df["Min Year"] = dscr_df["DSCR"].apply(
             lambda x: "← binding" if abs(x - m["min_dscr"]) < 0.001 else ""
         )
 
-        def highlight_min(row):
-            if row["Min Year"] == "← binding":
-                return ["background-color: #fef3c7"] * len(row)
-            return [""] * len(row)
-
         st.dataframe(
             dscr_df.style
                 .format({"Open Balance ($M)": "${:.1f}M", "Revenue": "{:,.0f}", "Opex": "{:,.0f}",
-                         "EBITDA": "{:,.0f}", "Debt Service": "{:,.0f}", "CFADS": "{:,.0f}", "DSCR": "{:.2f}x"})
-                .apply(highlight_min, axis=1),
+                         "CFADS": "{:,.0f}", "Debt Service": "{:,.0f}", "Cash After DS": "{:,.0f}", "DSCR": "{:.2f}x"}),
             use_container_width=True, hide_index=True,
         )
-        st.caption("Revenue, Opex, EBITDA, Debt Service, CFADS in $000s. Highlighted row = binding (minimum DSCR) year.")
+        st.caption("Revenue, Opex, CFADS, Debt Service, Cash After DS in $000s. DSCR = CFADS ÷ Debt Service. Highlighted row = binding (minimum DSCR) year.")
 
         st.divider()
         col_d1, col_d2 = st.columns(2)
@@ -474,8 +476,9 @@ def main():
             st.markdown(
                 "DSCR (Debt Service Coverage Ratio) measures how many times the project's "
                 "cash flow covers its annual debt obligation:\n\n"
-                "> **DSCR = EBITDA ÷ Annual Debt Service**\n\n"
-                "where Annual Debt Service = Interest + Principal for that year. "
+                "> **DSCR = CFADS ÷ Annual Debt Service**\n\n"
+                "where CFADS = EBITDA (revenue minus operating costs, before debt service) "
+                "and Annual Debt Service = Interest + Principal for that year. "
                 "A DSCR of 1.0x means the project exactly covers its debt payments with nothing left over. "
                 f"This model targets **{dscr_target:.2f}x** in every year of the debt term."
             )
@@ -500,16 +503,16 @@ def main():
             f"**Pre-flip TE:** {te_pre_flip}% → **Post-flip:** {te_post_flip}%"
         )
         flip_display = df[[
-            "yr", "cfads", "itc_alloc", "macrs_shield",
+            "yr", "cash_after_ds", "itc_alloc", "macrs_shield",
             "is_pre_flip", "te_alloc_pct", "te_cf", "te_running_irr", "sp_cf"
         ]].copy()
         flip_display["phase"] = flip_display["is_pre_flip"].map({True: "Pre-flip", False: "Post-flip ⚡"})
         flip_display = flip_display.drop(columns=["is_pre_flip"])
         flip_display.columns = [
-            "Year", "CFADS", "ITC Alloc", "MACRS Shield",
+            "Year", "Cash After DS", "ITC Alloc", "MACRS Shield",
             "TE Alloc %", "TE Cash Flow", "TE Running IRR", "Sponsor CF", "Phase"
         ]
-        for col in ["CFADS", "ITC Alloc", "MACRS Shield", "TE Cash Flow", "Sponsor CF"]:
+        for col in ["Cash After DS", "ITC Alloc", "MACRS Shield", "TE Cash Flow", "Sponsor CF"]:
             flip_display[col] = flip_display[col] / 1000
         flip_display["TE Alloc %"] = flip_display["TE Alloc %"] * 100
         flip_display["TE Running IRR"] = flip_display["TE Running IRR"].apply(
@@ -522,17 +525,17 @@ def main():
             return [""] * len(row)
 
         st.dataframe(
-            flip_display[["Year", "Phase", "CFADS", "ITC Alloc", "MACRS Shield",
+            flip_display[["Year", "Phase", "Cash After DS", "ITC Alloc", "MACRS Shield",
                            "TE Alloc %", "TE Cash Flow", "TE Running IRR", "Sponsor CF"]]
             .style
             .format({
-                "CFADS": "{:,.0f}", "ITC Alloc": "{:,.0f}", "MACRS Shield": "{:,.0f}",
+                "Cash After DS": "{:,.0f}", "ITC Alloc": "{:,.0f}", "MACRS Shield": "{:,.0f}",
                 "TE Alloc %": "{:.0f}%", "TE Cash Flow": "{:,.0f}", "Sponsor CF": "{:,.0f}",
             })
             .apply(highlight_flip, axis=1),
             use_container_width=True, hide_index=True,
         )
-        st.caption("All cash flows in $000s. TE Cash Flow = (CFADS × TE%) + ITC (Yr 1) + MACRS shield. Blue rows = post-flip.")
+        st.caption("All cash flows in $000s. TE Cash Flow = (Cash After DS × TE%) + ITC (Yr 1) + MACRS shield. Blue rows = post-flip.")
 
     # ── Tab 5: Charts ─────────────────────────────────────────────────────────
     with tab5:
@@ -555,11 +558,11 @@ def main():
         # Cash flow waterfall
         with col_b:
             fig_cf = go.Figure()
-            fig_cf.add_bar(x=df["yr"], y=df["ebitda"] / 1e6, name="EBITDA", marker_color="#93c5fd")
+            fig_cf.add_bar(x=df["yr"], y=df["ebitda"] / 1e6, name="CFADS (=EBITDA)", marker_color="#93c5fd")
             fig_cf.add_bar(x=df["yr"], y=-df["debt_service"] / 1e6, name="Debt Service", marker_color="#fca5a5")
-            fig_cf.add_scatter(x=df["yr"], y=df["cfads"] / 1e6, name="CFADS", mode="lines+markers",
+            fig_cf.add_scatter(x=df["yr"], y=df["cash_after_ds"] / 1e6, name="Cash After DS", mode="lines+markers",
                                line=dict(color="#16a34a", width=2))
-            fig_cf.update_layout(title="EBITDA vs Debt Service vs CFADS ($M)",
+            fig_cf.update_layout(title="CFADS vs Debt Service vs Cash After DS ($M)",
                                  xaxis_title="Year", yaxis_title="$M",
                                  barmode="relative", height=350, margin=dict(t=40, b=40))
             st.plotly_chart(fig_cf, use_container_width=True)
