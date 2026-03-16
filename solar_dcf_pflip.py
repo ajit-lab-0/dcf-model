@@ -286,6 +286,61 @@ def main():
 
     if "scenarios" not in st.session_state:
         st.session_state.scenarios = {}
+    if "show_instructions" not in st.session_state:
+        st.session_state.show_instructions = True
+
+    # ── First-load instructions dialog ────────────────────────────────────────
+    @st.dialog("📖 How to use this model", width="large")
+    def show_instructions_dialog():
+        st.markdown(
+            """
+### What this model does
+This is a **utility-scale solar project finance model** built around a **Partnership Flip** structure.
+Given your project inputs, it automatically:
+
+1. **Sizes senior debt** by sculpting debt service to hit your DSCR target in every year of the loan term (capped at 70% LTV).
+2. **Sizes tax equity** by back-solving the contribution so the tax equity investor earns their target IRR from ITC, MACRS depreciation shields, and cash distributions.
+3. **Residualizes sponsor equity** — whatever capex isn't covered by debt + tax equity.
+4. **Runs a 20-year cash flow waterfall** and computes project IRR, equity IRR (sponsor), NPV, DSCR profile, and the flip year.
+
+---
+
+### Sidebar Inputs
+
+| Section | Key inputs |
+|---|---|
+| **Project** | Size (MW), Capex ($/W), Capacity Factor, Panel Degradation |
+| **Revenue** | Contract Term, PPA Price Yr 1, PPA Escalator |
+| **Operating Costs** | O&M + Insurance + Management ($/MW/yr), Opex Escalator |
+| **Debt** | Min DSCR Target, Loan Term, Interest Rate |
+| **Tax Equity (Pflip)** | ITC Rate, TE Target Yield, Pre/Post-Flip Allocation %, Max TE % of Capex |
+| **Sponsor** | Discount Rate for NPV |
+
+> **Tip:** All outputs update live as you change any input — no "Run" button needed.
+
+---
+
+### Saving & Comparing Scenarios
+
+1. Dial in a set of assumptions you want to keep.
+2. Type a name (e.g. *Base Case*, *High Capex*) in the **Save Scenario** box in the sidebar and click **Save current scenario**.
+3. Repeat for as many scenarios as you like.
+4. Navigate to the **Scenario Compare** tab to see all saved scenarios side-by-side.
+5. Click the **✕** next to any scenario name in the sidebar to delete it.
+
+> Note: scenarios are stored in your browser session — refreshing the page will clear them.
+            """
+        )
+        if st.button("Got it", type="primary", use_container_width=True):
+            st.session_state.show_instructions = False
+            st.rerun()
+
+    if st.session_state.show_instructions:
+        show_instructions_dialog()
+
+    if st.button("📖 Instructions", key="show_instr_btn"):
+        st.session_state.show_instructions = True
+        st.rerun()
 
     # ── Sidebar inputs ────────────────────────────────────────────────────────
     with st.sidebar:
